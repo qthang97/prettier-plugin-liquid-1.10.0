@@ -124,5 +124,5 @@ You can format any Liquid file in the browser with one keyboard shortcut.
 		// Thụt dòng bằng ký tự tab (\t) thay vì 2 hoặc 4 spaces.
 	}
 ```
-# Link
-[Link tham khảo format]https://shopify.dev/docs/storefronts/themes/tools/liquid-prettier-plugin#use-the-plugin-in-the-browser
+# Link tham khảo
+https://shopify.dev/docs/storefronts/themes/tools/liquid-prettier-plugin#use-the-plugin-in-the-browser
