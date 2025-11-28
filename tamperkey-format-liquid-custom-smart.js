@@ -601,8 +601,7 @@
 
 			if (stackOtherLiquid.length == 0) {
 				// printDebugLog('Cannot find style or script block start format with liquid')
-				let prettier = await prettier.format(text, Object.assign({}, options, LIQUID_TYPE.options))
-				return prettier
+				return await prettier.format(text, Object.assign({}, options, LIQUID_TYPE.options))
 			} else {
 				// printDebugLog('Found style or script block')
 				let liquidFormatted = ''
