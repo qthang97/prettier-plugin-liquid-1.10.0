@@ -5,6 +5,7 @@
 // @description  try to take over the world!
 // @author       You
 // @match        https://*.mysapo.net/admin/themes/*
+// @exclude      https://*.mysapo.net/admin/themes/editor/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=mysapo.net
 // @require 		 https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/prettier-3.6.2-standalone.js
 // @require 		 https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/prettier-plugin-liquid-1.10.0-standalone.js
@@ -40,7 +41,7 @@
 		name: 'css',
 		regex: /\.(css\.bwt)|(css)|(scss\.bwt)|(scss)$/i,
 		options: {
-			parser: 'css',
+			parser: 'scss',
 			plugins: [prettierPlugins.postcss],
 		},
 	}
@@ -722,12 +723,12 @@
 	 ******************************************************************/
 	async function formatCodeMirror(newOptions) {
 		let cm = getCodeMirror()
-		let scrollInfo = cm.getScrollInfo()
-		let cursor = cm.getCursor()
 		if (!cm) {
 			alert('Không tìm thấy CodeMirror!')
 			return
 		}
+		let scrollInfo = cm.getScrollInfo()
+		let cursor = cm.getCursor()
 
 		let content = cm.getValue()
 		let formatted = ''
