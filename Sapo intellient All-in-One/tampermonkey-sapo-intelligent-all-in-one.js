@@ -19,6 +19,13 @@
 // @require      https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/walk-8-3-2.min.js
 // @require      https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/csstree-2-3-1.min.js
 // @require      https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/fuse-7-0-0.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/html-hint.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/javascript-hint.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/show-hint.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/xml-hint.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/css-hint.min.js
+// @require		   https://raw.githubusercontent.com/qthang97/prettier-plugin-liquid-1.10.0/refs/heads/main/Sapo%20intellient%20All-in-One/anyword-hint.min.js
+
 // ==/UserScript==
 
 ;(function () {
