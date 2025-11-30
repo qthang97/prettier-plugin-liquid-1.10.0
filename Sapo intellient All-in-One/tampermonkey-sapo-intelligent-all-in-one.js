@@ -222,6 +222,7 @@
 	let localObjectKeys = {}
 	let localCssClasses = new Set()
 	let externalCssClasses = new Set()
+	let cssParentChildMap = {}
 	let currentFileType = 'unknown'
 	const LS_KEY = window.location.host
 
@@ -252,11 +253,85 @@
 		return meta ? meta.getAttribute('content') : ''
 	}
 
+	/* ========================== CSS Inteligent ==============================*/
+	// Scan and parse with css tree
+	function parseSCSSWithStack(cssText, targetSet, targetMap) {
+		// 1. Dọn dẹp sơ bộ: Xóa comment, Liquid tag, và nội dung trong ngoặc đơn (để tránh params của mixin làm nhiễu)
+		let clean = cssText
+			.replace(/\/\*[\s\S]*?\*\//g, '') // Xóa comment /**/
+			.replace(/\/\/.*$/gm, '') // Xóa comment //
+			.replace(/\{%[\s\S]*?%\}/g, ' ') // Xóa Liquid logic
+			.replace(/\{\{[\s\S]*?\}\}/g, ' ') // Xóa Liquid variable
+			.replace(/\([^\)]*\)/g, '()') // Xóa nội dung trong ( ) ví dụ @media (max-width...) -> @media ()
+
+		let stack = []
+		let buffer = ''
+
+		// Regex trích xuất class name từ chuỗi selector (ví dụ: ".box-title, .item" -> ["box-title", "item"])
+		// Bỏ qua các pseudo-class như :hover, ::before
+		const extractClassNames = str => {
+			// Chỉ lấy phần trước dấu : (nếu có)
+			const pureStr = str.split(':')[0]
+			const matches = pureStr.match(/\.(-?[_a-zA-Z0-9-]+)/g)
+			return matches ? matches.map(c => c.substring(1)) : []
+		}
+
+		for (let i = 0; i < clean.length; i++) {
+			const char = clean[i]
+			if (char === '{') {
+				const selectorStr = buffer.trim()
+
+				// Nếu là @media hoặc keyframes, ta coi như "trong suốt" (transparent), push null để giữ stack level
+				if (selectorStr.startsWith('@')) {
+					stack.push(null)
+				} else {
+					const classesInSelector = extractClassNames(selectorStr)
+
+					if (classesInSelector.length > 0) {
+						const currentClass = classesInSelector[classesInSelector.length - 1] // Lấy class cuối cùng làm key chính
+
+						targetSet.add(currentClass) // Thêm vào danh sách tổng
+
+						// Tìm cha gần nhất trong stack để gán quan hệ
+						if (stack.length > 0) {
+							let parent = null
+							// Duyệt ngược stack để tìm cha (bỏ qua null - tức là bỏ qua @media)
+							for (let k = stack.length - 1; k >= 0; k--) {
+								if (stack[k]) {
+									parent = stack[k]
+									break
+								}
+							}
+
+							if (parent) {
+								if (!targetMap[parent]) targetMap[parent] = new Set()
+								targetMap[parent].add(currentClass)
+								// Debug: console.log(`Mapped: .${parent} > .${currentClass}`);
+							}
+						}
+						stack.push(currentClass)
+					} else {
+						// Gặp thẻ div, body, hoặc id... push null
+						stack.push(null)
+					}
+				}
+				buffer = ''
+			} else if (char === '}') {
+				stack.pop()
+				buffer = ''
+			} else if (char === ';') {
+				buffer = ''
+			} else {
+				buffer += char
+			}
+		}
+	}
+
+	// Get Css file from current Asset
 	async function fetchExternalCSS(forceUpdate = false, retryCount = 0) {
-		console.log('[All-in-One] Bắt đầu tiến trình lấy CSS...')
+		console.log(`[All-in-One] Bắt đầu lấy CSS... (Lần thử: ${retryCount})`)
 		const MAX_RETRIES = 2
 		let EXTERNAL_CSS_URL = []
-		let cachedData = new Map()
 
 		let sideBar_el = document.querySelector('#asset-list-container')
 		if (sideBar_el) {
@@ -268,22 +343,20 @@
 			}
 		}
 
-		if (EXTERNAL_CSS_URL.length === 0) {
-			console.warn('[All-in-One] Không tìm thấy file CSS nào trong sidebar.')
-			return
-		}
+		if (EXTERNAL_CSS_URL.length === 0) return
 
 		try {
 			let adminUrl = window.location.href
 			let matchUrlWithAdmin = adminUrl.match(/(https:\/\/\w.+\/admin\/themes\/)(\d+)/i)
-			if (!matchUrlWithAdmin) throw 'Cannot found url admin/themes/ID'
+			if (!matchUrlWithAdmin) throw 'Lỗi URL Admin'
 
 			if (forceUpdate) {
 				externalCssClasses.clear()
+				cssParentChildMap = {}
 			}
 
 			const btn = document.getElementById('btn-refresh-css')
-			if (btn) btn.innerText = 'Đang tải...'
+			if (btn) btn.innerText = retryCount > 0 ? `Thử lại (${retryCount})...` : 'Đang tải...'
 
 			for (let i = 0; i < EXTERNAL_CSS_URL.length; i++) {
 				let assetKey = EXTERNAL_CSS_URL[i]
@@ -298,9 +371,10 @@
 					},
 				})
 
+				if (!response.ok) throw new Error('HTTP Error')
+
 				const rawText = await response.text()
 				let cssContent = ''
-
 				try {
 					const data = JSON.parse(rawText)
 					cssContent = data.content || data.value || (data.asset ? data.asset.value : '')
@@ -309,94 +383,294 @@
 				}
 
 				if (cssContent && typeof cssContent === 'string') {
-					let cleanCss = cssContent.replace(/\{%[\s\S]*?%\}/g, ' ').replace(/\{\{[\s\S]*?\}\}/g, ' ')
-					let parsedSuccess = false
-					try {
-						const ast = csstree.parse(cleanCss, {
-							parseValue: false,
-							parseAtrulePrelude: false,
-						})
-						csstree.walk(ast, function (node) {
-							if (node.type === 'ClassSelector') {
-								externalCssClasses.add(node.name)
-							}
-						})
-						parsedSuccess = true
-					} catch (err) {
-						parsedSuccess = false
-					}
-
-					if (!parsedSuccess) {
-						const regex = /\.([a-zA-Z0-9_\-]+)/g //<-- Không cần dấu {, bắt được nhiều hơn
-						let match
-						while ((match = regex.exec(cssContent)) !== null) {
-							externalCssClasses.add(match[1])
-						}
-					}
-					cachedData.set(assetKey, [...externalCssClasses])
+					// QUAN TRỌNG: Truyền biến toàn cục vào đây
+					parseSCSSWithStack(cssContent, externalCssClasses, cssParentChildMap)
 				}
 			}
 
-			localStorage.setItem(LS_KEY, JSON.stringify([...cachedData]))
-			console.log(`[All-in-One] Đã tải và lưu ${externalCssClasses.size} classes vào LocalStorage.`)
-			alert(`Cập nhật thành công! Đã tìm thấy ${externalCssClasses.size} classes.`)
+			// Serialize Map for storage
+			const serializedMap = {}
+			for (const [key, valSet] of Object.entries(cssParentChildMap)) {
+				serializedMap[key] = Array.from(valSet)
+			}
+			const dataToSave = { flat: [...externalCssClasses], relations: serializedMap }
+			localStorage.setItem(LS_KEY, JSON.stringify(dataToSave))
+
+			console.log(`[All-in-One] Xong. ${externalCssClasses.size} classes.`)
+			const cachingStatus = document.getElementById('csscaching')
+			if (cachingStatus) {
+				cachingStatus.innerText = `Đã cache ${externalCssClasses.size} class.`
+				setTimeout(() => cachingStatus.remove(), 3000)
+			}
 		} catch (e) {
-			console.error('[All-in-One] Lỗi khi fetch CSS:', e)
-
-			// --- BỔ SUNG LOGIC RETRY TẠI ĐÂY ---
+			console.error('Lỗi Fetch CSS:', e)
 			if (retryCount < MAX_RETRIES) {
-				const nextRetry = retryCount + 1
-				const delay = 2000 // 2 giây
-
-				console.log(`[All-in-One] Gặp lỗi, chờ ${delay}ms để thử lại lần ${nextRetry}...`)
-
-				// Cập nhật text hiển thị lỗi tạm thời
-				const btn = document.getElementById('btn-refresh-css')
-				if (btn) btn.innerText = `Lỗi! Thử lại sau ${delay / 1000}s...`
-				const cachingStatus = document.getElementById('csscaching')
-				if (cachingStatus) cachingStatus.innerText = `Mất kết nối. Đang thử lại (${nextRetry}/${MAX_RETRIES})...`
-
-				// Gọi lại hàm sau thời gian delay
-				setTimeout(() => {
-					fetchExternalCSS(forceUpdate, nextRetry)
-				}, delay)
-
-				// Return để thoát khỏi hàm hiện tại, không chạy xuống finally ngay
+				setTimeout(() => fetchExternalCSS(forceUpdate, retryCount + 1), 2000)
 				return
 			}
 		} finally {
-			// Chỉ reset nút bấm nếu KHÔNG PHẢI đang chờ retry
-			if (retryCount >= MAX_RETRIES || !document.getElementById('btn-refresh-css')?.innerText.includes('Thử lại sau')) {
+			if (retryCount >= MAX_RETRIES || !document.getElementById('btn-refresh-css')?.innerText.includes('Thử lại')) {
 				const btn = document.getElementById('btn-refresh-css')
 				if (btn) btn.innerText = 'Cập nhật CSS Cache'
 			}
 		}
 	}
 
-	function initCSSManager() {
+	// Scan and detect context inside tag style or file type .css, .scss
+	function isCssContext(editor) {
+		if (currentFileType === 'css' || currentFileType === 'scss') return true
+		const cursor = editor.getCursor()
+		const token = editor.getTokenAt(cursor)
+		const inner = CodeMirror.innerMode(editor.getMode(), token.state)
+		if (inner.mode.name === 'css' || inner.mode.name === 'text/x-scss') return true
+		let state = token.state
+		while (state) {
+			if (state.tagName === 'style') return true
+			if (state.context && state.context.tagName === 'style') return true
+			if (state.htmlState) state = state.htmlState
+			else if (state.localState) state = state.localState
+			else break
+		}
+		return false
+	}
+
+	// Helper: Tìm class cha
+	function findParentTagClass(cm) {
+		const cursor = cm.getCursor()
+		const doc = cm.getDoc()
+
+		// Quét ngược tối đa 30 dòng để tìm thẻ cha
+		for (let i = cursor.line; i >= Math.max(0, cursor.line - 30); i--) {
+			let text = doc.getLine(i)
+
+			// Nếu là dòng hiện tại, chỉ xét phần văn bản TRƯỚC con trỏ để tránh bắt chính thẻ đang gõ
+			if (i === cursor.line) {
+				// Kiểm tra xem con trỏ có đang nằm trong thẻ mở không (<div ... | ... >)
+				const textBeforeCursor = text.slice(0, cursor.ch)
+				const lastOpenTag = textBeforeCursor.lastIndexOf('<')
+				const lastCloseTag = textBeforeCursor.lastIndexOf('>')
+
+				// Nếu tìm thấy dấu < mà chưa thấy dấu >, tức là đang ở trong thẻ hiện tại
+				// -> Ta bỏ qua dòng này để tìm CHA của nó
+				if (lastOpenTag > lastCloseTag) {
+					continue
+				}
+			}
+
+			// Regex tìm thẻ mở có class (chấp nhận cả xuống dòng attribute)
+			// Cấu trúc: <tên_thẻ ... class="giá trị" ... >
+			// Lưu ý: Đơn giản hóa để bắt các trường hợp phổ biến
+			const classMatch = text.match(/class\s*=\s*["']([^"']+)["']/)
+
+			if (classMatch) {
+				// Kiểm tra xem dòng này có phải là thẻ đóng không (</div>) -> Bỏ qua
+				if (text.match(/<\//)) continue
+
+				// Kiểm tra xem có phải thẻ tự đóng không (<img ... />) -> Bỏ qua
+				if (text.match(/\/>/)) continue
+
+				// Nếu thỏa mãn, đây chính là thẻ cha gần nhất có class
+				return classMatch[1].split(/\s+/).filter(c => c.trim().length > 0)
+			}
+		}
+		return []
+	}
+
+	function getClassHints(editor) {
+		const cursor = editor.getCursor()
+		// Lấy dòng hiện tại và tìm từ đang gõ
+		const token = editor.getTokenAt(cursor)
+
+		// Xác định chính xác từ đang gõ (handle trường hợp con trỏ nằm giữa từ hoặc sau dấu cách)
+		const line = editor.getLine(cursor.line)
+		const beforeCursor = line.slice(0, cursor.ch)
+
+		// Kiểm tra xem có đang trong attribute class="..." không
+		if (!/class\s*=\s*["'][^"']*$/.test(beforeCursor) && token.type !== 'string') {
+			// Fallback lỏng lẻo hơn cho trường hợp token chưa được tokenize là string
+			if (!beforeCursor.includes('class=')) return null
+		}
+
+		// Lấy từ khóa đang gõ dở (wordToComplete)
+		let wordToComplete = ''
+		let startPos = cursor.ch
+
+		const matchWord = beforeCursor.match(/([a-zA-Z0-9_\-]+)$/)
+		if (matchWord) {
+			wordToComplete = matchWord[1]
+			startPos = cursor.ch - wordToComplete.length
+		}
+
+		// 1. TÌM CLASS CHA & CLASS CON LIÊN QUAN
+		const parentClasses = findParentTagClass(editor)
+		let childClasses = new Set()
+
+		// Duyệt qua các class của cha, tìm con của nó trong map
+		parentClasses.forEach(pClass => {
+			if (cssParentChildMap[pClass]) {
+				cssParentChildMap[pClass].forEach(child => childClasses.add(child))
+			}
+		})
+
+		const all = [...externalCssClasses, ...localCssClasses]
+		let priorityList = [] // List ưu tiên (con của cha)
+		let normalList = [] // List thường
+
+		const searchLower = wordToComplete.toLowerCase()
+
+		all.forEach(cls => {
+			const clsLower = cls.toLowerCase()
+			const isChild = childClasses.has(cls)
+
+			// Logic lọc thông minh hơn:
+			if (isChild) {
+				// Nếu là class con (quan hệ cha-con đúng):
+				// Chỉ cần CHỨA từ khóa là hiển thị (ví dụ gõ "coupon" vẫn ra "box-title" nếu box-title nằm trong section_coupon? Không, gõ "title" ra "box-title")
+				// Hoặc nếu chưa gõ gì (searchLower == '') thì hiện hết con
+				if (searchLower === '' || clsLower.includes(searchLower)) {
+					priorityList.push(cls)
+				}
+			} else {
+				// Nếu là class thường: Phải bắt đầu bằng từ khóa hoặc chứa (nếu từ khóa dài)
+				if (clsLower.startsWith(searchLower)) {
+					normalList.push(cls)
+				} else if (searchLower.length > 2 && clsLower.includes(searchLower)) {
+					normalList.push(cls)
+				}
+			}
+		})
+
+		// Sắp xếp: Ưu tiên list con lên đầu
+		priorityList.sort((a, b) => a.length - b.length)
+		normalList.sort((a, b) => a.length - b.length)
+
+		// Gộp lại: Ưu tiên trước -> Thường sau
+		let resultList = [...new Set([...priorityList, ...normalList])]
+		if (resultList.length > 50) resultList.length = 50 // Giới hạn số lượng
+
+		const processedList = resultList.map(cls => {
+			const isPriority = childClasses.has(cls)
+			return {
+				text: cls,
+				// Thêm dấu ★ để nhận biết class này được gợi ý dựa trên ngữ cảnh cha
+				displayText: isPriority ? `★ ${cls}` : cls,
+				className: isPriority ? 'CodeMirror-hint-priority' : '',
+			}
+		})
+
+		return {
+			list: processedList,
+			from: CodeMirror.Pos(cursor.line, startPos),
+			to: CodeMirror.Pos(cursor.line, cursor.ch),
+		}
+	}
+
+	// Hàm mới: Gợi ý hỗn hợp cho CSS/SCSS
+	function getCssScssHints(editor, options) {
+		const cursor = editor.getCursor()
+		const token = editor.getTokenAt(cursor)
+		const line = editor.getLine(cursor.line)
+
+		// Kiểm tra xem người dùng có đang gõ tên class (bắt đầu bằng .) hay không
+		const isClassSelector = token.string.startsWith('.') || (token.type === 'error' && /^[\w-]+$/.test(token.string) && line.charAt(token.start - 1) === '.') || (token.string.trim() === '' && line.charAt(cursor.ch - 1) === '.')
+
+		if (isClassSelector) {
+			// 1. Xử lý gợi ý Custom Class
+			let word = token.string
+			let start = token.start
+
+			if (word.startsWith('.')) {
+				word = word.slice(1)
+				start++ // Bỏ qua dấu chấm khi tính vị trí replace
+			} else if (line.charAt(token.start - 1) === '.') {
+				// Trường hợp token là tên class nhưng dấu . nằm ở token trước
+				start = token.start
+			} else if (word.trim() === '') {
+				// Trường hợp mới gõ dấu . và chưa có chữ nào
+				start = cursor.ch
+			}
+
+			const all = [...externalCssClasses, ...localCssClasses]
+			const matched = all
+				.filter(c => c.toLowerCase().startsWith(word.toLowerCase()))
+				.sort((a, b) => a.length - b.length)
+				.slice(0, 50) // Limit
+
+			if (matched.length > 0) {
+				return {
+					list: matched.map(c => ({
+						text: c,
+						displayText: `.${c}`, // Hiển thị có dấu chấm cho dễ nhìn
+						className: 'CodeMirror-hint-css-selector',
+					})),
+					from: CodeMirror.Pos(cursor.line, start),
+					to: CodeMirror.Pos(cursor.line, cursor.ch),
+				}
+			}
+		}
+
+		// 2. Nếu không phải class selector, fallback về native CSS hint (thuộc tính, giá trị)
+		// Sử dụng CodeMirror.hint.css hoặc scss nếu có
+		const nativeHintFunc = CodeMirror.hint.css || CodeMirror.hint.anyword
+		return nativeHintFunc(editor, options)
+	}
+
+	// Scan CSS on current file open
+	function scanLocalCSS(editor) {
+		const content = editor.getValue()
+		localCssClasses.clear() // Xóa dữ liệu cũ của file hiện tại
+
+		// QUAN TRỌNG: Truyền biến localCssClasses để lưu trữ riêng biệt
+		// cssParentChildMap vẫn dùng chung để tận dụng quan hệ cha con
+		parseSCSSWithStack(content, localCssClasses, cssParentChildMap)
+
+		return localCssClasses
+	}
+
+	// Save CSS cache to localStorage
+	function updateLocalCachedDataWhenSaveFile(scannedLocalClasses) {
+		if (!scannedLocalClasses || scannedLocalClasses.size === 0) return
+
 		const cachedData = localStorage.getItem(LS_KEY)
 		if (cachedData) {
 			try {
 				const parsedData = JSON.parse(cachedData)
-				const tmpMap = new Map(parsedData)
-				for (const [key, value] of tmpMap) {
-					value.forEach(r => externalCssClasses.add(r))
+				if (parsedData.flat && Array.isArray(parsedData.flat)) {
+					const tmpSet = new Set(parsedData.flat)
+					// Merge class mới quét được vào
+					scannedLocalClasses.forEach(cls => tmpSet.add(cls))
+					parsedData.flat = Array.from(tmpSet)
+
+					// Cập nhật luôn cả Map quan hệ (vì scanLocalCSS đã update vào cssParentChildMap rồi)
+					const serializedMap = {}
+					for (const [key, valSet] of Object.entries(cssParentChildMap)) {
+						serializedMap[key] = Array.from(valSet)
+					}
+					parsedData.relations = serializedMap
+
+					localStorage.setItem(LS_KEY, JSON.stringify(parsedData))
+
+					// Cập nhật biến runtime toàn cục để gợi ý ngay lập tức
+					scannedLocalClasses.forEach(cls => externalCssClasses.add(cls))
+
+					console.log(`[All-in-One] Đã cập nhật ${scannedLocalClasses.size} class mới vào Cache.`)
 				}
-				document.getElementById('csscaching')?.remove()
-				console.log(`[All-in-One] Loaded ${externalCssClasses.size} classes from LocalStorage.`)
 			} catch (e) {
-				console.error('Lỗi parse cache, sẽ fetch lại.', e)
-				const cachingStatus = document.getElementById('csscaching')
-				if (cachingStatus) cachingStatus.innerText = 'Lỗi parse cache, đang fetch lại....'
-				fetchExternalCSS(true)
+				console.error('[All-in-One] Lỗi khi cập nhật cache cục bộ:', e)
 			}
-		} else {
-			console.log('[All-in-One] Chưa có cache, bắt đầu fetch lần đầu...')
-			fetchExternalCSS(true)
 		}
-		createUpdateButton()
 	}
 
+	// Handel Ctrl + S then save css cache to local storage
+	function handleCtrlS(editor) {
+		let tmpClass = scanLocalCSS(editor)
+		updateLocalCachedDataWhenSaveFile(tmpClass)
+		console.log('[All-in-One] Bắt Ctrl+S: Đã cập nhật local cache.')
+		const message = `[IntelliSense] Đã quét xong (${localCssClasses.size} classes) và cập nhật cache!`
+		console.warn(message)
+	}
+
+	// Create Button refresh cache manual
 	function createUpdateButton() {
 		if (document.getElementById('btn-refresh-css')) return
 		let btn
@@ -431,7 +705,44 @@
 		})
 	}
 
-	// --- 3. SCANNERS (FIXED: Không xóa cache khi Parse lỗi) ---
+	// Init CSS
+	function initCSSManager() {
+		const cachedData = localStorage.getItem(LS_KEY)
+		if (cachedData) {
+			try {
+				const parsed = JSON.parse(cachedData)
+
+				// Kiểm tra xem cache là format CŨ (Mảng) hay MỚI (Object)
+				if (Array.isArray(parsed)) {
+					// Format cũ -> Fetch lại để có data mới xịn hơn
+					console.log('Phát hiện cache cũ, đang fetch lại...')
+					fetchExternalCSS(true)
+					return
+				}
+
+				// Load Format mới
+				if (parsed.flat) {
+					parsed.flat.forEach(c => externalCssClasses.add(c))
+				}
+				if (parsed.relations) {
+					for (const key in parsed.relations) {
+						cssParentChildMap[key] = new Set(parsed.relations[key])
+					}
+				}
+				console.log(`[All-in-One] Loaded relations map.`)
+				document.getElementById('csscaching')?.remove()
+			} catch (e) {
+				fetchExternalCSS(true)
+			}
+		} else {
+			fetchExternalCSS(true)
+		}
+		createUpdateButton()
+	}
+
+	/* ========================= JS Intelligent ========================= */
+
+	// Scan JS on current
 	function scanLocalJS(editor) {
 		const content = editor.getValue()
 		const newVars = new Set()
@@ -509,80 +820,7 @@
 		}
 	}
 
-	function scanLocalCSS(editor) {
-		const content = editor.getValue()
-		const newSet = new Set()
-
-		const parseCssHybrid = cssText => {
-			// Mask Liquid tags
-			let cleanCss = cssText.replace(/\{%[\s\S]*?%\}/g, ' ').replace(/\{\{[\s\S]*?\}\}/g, ' ')
-			let parsed = false
-
-			// Ưu tiên dùng CSSTree
-			try {
-				const ast = csstree.parse(cleanCss, {
-					parseValue: false,
-					parseAtrulePrelude: false,
-					onParseError: function (e) {},
-				})
-				csstree.walk(ast, function (node) {
-					if (node.type === 'ClassSelector') {
-						newSet.add(node.name)
-					}
-				})
-				parsed = true
-			} catch (e) {
-				parsed = false
-			}
-
-			// Fallback Regex: Cập nhật Regex mạnh hơn
-			// Bắt tất cả chuỗi .classname kể cả khi không có dấu { ngay sau
-			if (!parsed) {
-				const regex = /\.([a-zA-Z0-9_\-]+)/g
-				let match
-				// Quét trên cleanCss để tránh Liquid tag làm nhiễu
-				while ((match = regex.exec(cleanCss)) !== null) {
-					newSet.add(match[1])
-				}
-			}
-		}
-
-		const styleBlockRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi
-		let blockMatch
-		while ((blockMatch = styleBlockRegex.exec(content)) !== null) {
-			parseCssHybrid(blockMatch[1])
-		}
-
-		if (currentFileType === 'css') {
-			parseCssHybrid(content)
-		}
-
-		localCssClasses = newSet
-		return localCssClasses
-	}
-
-	function updateLocalCachedDataWhenSaveFile(localCssClasses) {
-		let matchCurrentFileName = window.location.href.match(/\?key\=(\w.*)/)
-		if (!matchCurrentFileName) return
-		let currentFileName = matchCurrentFileName[1]
-		const cachedData = localStorage.getItem(LS_KEY)
-		if (cachedData) {
-			const parsedData = JSON.parse(cachedData)
-			const tmpMap = new Map(parsedData)
-			tmpMap.set(currentFileName, [...localCssClasses])
-			localStorage.setItem(LS_KEY, JSON.stringify([...tmpMap]))
-		}
-	}
-
-	function handleCtrlS(editor) {
-		let tmpClass = scanLocalCSS(editor)
-		updateLocalCachedDataWhenSaveFile(tmpClass)
-		console.log('[All-in-One] Bắt Ctrl+S: Đã cập nhật local cache.')
-		const message = `[IntelliSense] Đã quét xong (${localCssClasses.size} classes) và cập nhật cache!`
-		console.warn(message)
-	}
-
-	// --- 4. CONTEXT HELPERS ---
+	// Scan and detect context inside tag script or file type .js
 	function isJsContext(cm) {
 		if (currentFileType === 'javascript') return true
 		const cursor = cm.getCursor()
@@ -602,7 +840,6 @@
 		}
 
 		// printDebugLog(`Checking JS Context at Line ${cursor.line + 1}, Ch ${cursor.ch}`)
-
 		let foundOpenTag = false
 		for (let i = cursor.line; i >= 0; i--) {
 			let text = doc.getLine(i)
@@ -654,25 +891,7 @@
 		return false
 	}
 
-	function isCssContext(editor) {
-		if (currentFileType === 'css' || currentFileType === 'scss') return true
-		const cursor = editor.getCursor()
-		const token = editor.getTokenAt(cursor)
-		const inner = CodeMirror.innerMode(editor.getMode(), token.state)
-		if (inner.mode.name === 'css' || inner.mode.name === 'text/x-scss') return true
-		let state = token.state
-		while (state) {
-			if (state.tagName === 'style') return true
-			if (state.context && state.context.tagName === 'style') return true
-			if (state.htmlState) state = state.htmlState
-			else if (state.localState) state = state.localState
-			else break
-		}
-		return false
-	}
-
 	// --- 5. HINT PROVIDERS (FIXED: ƯU TIÊN PREFIX) ---
-
 	function getJsHints(cm) {
 		const cursor = cm.getCursor()
 		const token = cm.getTokenAt(cursor)
@@ -739,45 +958,7 @@
 		}
 	}
 
-	// HTML Class Hint (FIXED: Ưu tiên StartsWith)
-	function getClassHints(editor) {
-		const cursor = editor.getCursor()
-		const lineContent = editor.getLine(cursor.line).slice(0, cursor.ch)
-
-		// Regex bắt class="..." hoặc class='...'
-		const classMatch = lineContent.match(/class\s*=\s*["']([^"']*)$/)
-		if (!classMatch) return null
-
-		const words = classMatch[1].split(/\s+/)
-		const wordToComplete = words[words.length - 1]
-
-		// Gộp tất cả class từ External và Local
-		const combinedList = [...externalCssClasses, ...localCssClasses]
-
-		// 1. Tìm các Class bắt đầu bằng từ khóa (Prefix Match) - Ưu tiên số 1
-		// VD: gõ "col" -> lấy "col-6", "col-md-12"
-		let resultList = combinedList.filter(cls => cls.startsWith(wordToComplete))
-
-		// Sắp xếp: Class ngắn lên trước (VD: "col-6" lên trước "col-6-auto")
-		resultList.sort((a, b) => a.length - b.length || a.localeCompare(b))
-
-		// 2. Logic "Fallback":
-		// CHỈ KHI KHÔNG TÌM THẤY class nào bắt đầu bằng từ khóa, lúc đó mới tìm "bao gồm" (Contains)
-		// Điều này giúp loại bỏ "rác" như "cart__col-6" khi bạn đang gõ "col-6"
-		if (resultList.length === 0 && wordToComplete.length >= 2) {
-			let containsMatches = combinedList.filter(cls => cls.includes(wordToComplete))
-			containsMatches.sort((a, b) => a.length - b.length || a.localeCompare(b))
-			resultList = containsMatches
-		}
-
-		return {
-			list: resultList,
-			from: CodeMirror.Pos(cursor.line, cursor.ch - wordToComplete.length),
-			to: CodeMirror.Pos(cursor.line, cursor.ch),
-		}
-	}
-
-	// --- 6. CORE LOGIC ---
+	/* ================================= Main ================================ */
 	function applyConfig(cm) {
 		if (cm._hasAllInOneHook) return
 
@@ -810,23 +991,28 @@
 				alignWithWord: true,
 			}
 
-			const isClassAttr = /class\s*=\s*["']([^"']*)$/.test(line.slice(0, cursor.ch))
-			if (isClassAttr) {
-				const hints = getClassHints(editor)
-				if (hints && hints.list.length > 0) CodeMirror.showHint(editor, () => hints, hintOptions)
+			// 1. Ưu tiên HTML Class Attribute
+			// Kiểm tra bằng logic mới trong getClassHints
+			const htmlHints = getClassHints(editor)
+			if (htmlHints && htmlHints.list.length > 0) {
+				CodeMirror.showHint(editor, () => htmlHints, hintOptions)
 				return
 			}
 
+			// 2. JS Context
 			if (isJsContext(editor)) {
 				CodeMirror.showHint(editor, getJsHints, hintOptions)
 				return
 			}
 
+			// 3. CSS/SCSS Context (SỬA ĐỔI QUAN TRỌNG)
 			if (isCssContext(editor)) {
-				CodeMirror.showHint(editor, CodeMirror.hint.css, hintOptions)
+				// Dùng hàm wrapper mới để support cả Class name
+				CodeMirror.showHint(editor, getCssScssHints, hintOptions)
 				return
 			}
 
+			// 4. HTML Tag Hints (Fallback)
 			const token = editor.getTokenAt(cursor)
 			const inner = CodeMirror.innerMode(editor.getMode(), token.state)
 
@@ -847,8 +1033,13 @@
 		}
 
 		extraKeys['Ctrl-S'] = function (editor) {
-			handleCtrlS(editor)
-			document.getElementById('save-button').click()
+			try {
+				handleCtrlS(editor)
+			} catch (e) {
+				console.error('Error scan and save current css class')
+			} finally {
+				document.getElementById('save-button').click()
+			}
 		}
 		extraKeys['Ctrl-Space'] = function (editor) {
 			triggerIntelliSense(editor, false)
