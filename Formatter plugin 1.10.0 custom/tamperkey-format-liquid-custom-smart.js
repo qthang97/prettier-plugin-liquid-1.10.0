@@ -26,6 +26,7 @@
 	}
 
 	const DEBUG = false
+	
 	const JS_TYPE = {
 		name: 'Javascript',
 		regex: /\.(js\.bwt)|(js)$/i,
@@ -129,8 +130,8 @@
 
 	function extractLiquidBlocks(textArr) {
 		// --- 1. BLOCK REGEX (Giữ nguyên) ---
-		const regex_LiquidOpen = /{%-?\s*(if|for|case|unless|capture|paginate|comment|form)\b[\s\S]*?%}/gi
-		const regex_LiquidClose = /{%-?\s*endif|endfor|endcase|endunless|endcapture|endpaginate|endcomment|endform\b[\s\S]*?%}/gi
+		const regex_LiquidOpen = /{%-?\s*(if|for|case|unless|capture|paginate|form)\b[\s\S]*?%}/gi
+		const regex_LiquidClose = /{%-?\s*endif|endfor|endcase|endunless|endcapture|endpaginate|endform\b[\s\S]*?%}/gi
 
 		const singleTags = 'assign|render|include|section|layout|break|continue|cycle|increment|decrement|echo|else|elsif|when'
 		const pattern_Var = '\\{\\{[\\s\\S]*?\\}\\}'
@@ -202,7 +203,7 @@
 					tmpstack.push({
 						type: 'line',
 						startLine: i,
-						content: [line], // Giữ nguyên indent cho trường hợp inline
+						content: [line.trim()], // Giữ nguyên indent cho trường hợp inline
 						formatted: [line],
 						endLine: i,
 					})
@@ -400,7 +401,7 @@
 			printDebugLog('newOptions', newOptions, 'tmpOptions', tmpOptions, 'textArr default', textArr)
 
 			let stack = extractLiquidBlocks(textArr)
-			printDebugLog('default Stack', stack)
+			printDebugLog('formatterOtherLiquid default Stack', stack)
 
 			if (stack.length == 0) {
 				return await prettier.format(text, tmpOptions)
@@ -734,9 +735,12 @@
 		let formatted = ''
 
 		try {
+			console.log("Format document");
 			if (newOptions.parser === 'liquid-html') {
+				printDebugLog("Format with formatterLiquid")
 				formatted = await formatterLiquid(content)
 			} else {
+				printDebugLog("Format with formatterOtherLiquid")
 				formatted = await formatterOtherLiquid(content, newOptions)
 			}
 			if (!formatted) return
@@ -786,7 +790,6 @@
 		}
 	}
 
-	printDebugLog('URL_WITH_TYPE', URL_WITH_TYPE)
 	/******************************************************************
 	 * HOTKEY = SHIFT + ALT + F
 	 ******************************************************************/
