@@ -220,9 +220,7 @@
 
 	let localJsVars = new Set()
 	let localObjectKeys = {}
-	let localCssClasses = new Set()
-	let externalCssClasses = new Set()
-	let cssParentChildMap = {}
+
 	let currentFileType = 'unknown'
 	const LS_KEY = window.location.host
 
@@ -247,71 +245,74 @@
 		return 'unknown'
 	}
 
+	/* ========================== CSS Inteligent ==============================*/
+	let localCssClasses = new Set()
+	let externalCssClasses = new Set()
+	let cssParentChildMap = {}
+	let externalScssVariables = new Set() // Biến từ file bên ngoài
+	let localScssVariables = new Set() // Biến trong file đang mở
 	// --- 2. DATA LOADERS (CSS External) ---
 	function getCsrfToken() {
 		const meta = document.querySelector('meta[name="csrf-token"]')
 		return meta ? meta.getAttribute('content') : ''
 	}
-
-	/* ========================== CSS Inteligent ==============================*/
 	// Scan and parse with css tree
-	function parseSCSSWithStack(cssText, targetSet, targetMap) {
-		// 1. Dọn dẹp sơ bộ: Xóa comment, Liquid tag, và nội dung trong ngoặc đơn (để tránh params của mixin làm nhiễu)
+	function parseSCSSWithStack(cssText, targetSet, targetMap, targetVarSet = null) {
+		// [NEW] 1a. Quét biến SCSS trước khi clean (để tránh mất dữ liệu trong ngoặc hoặc logic)
+		// Regex tìm chuỗi bắt đầu bằng $ theo sau là chữ/số/- và kết thúc bằng dấu :
+		if (targetVarSet) {
+			const varRegex = /\$([a-zA-Z0-9_-]+)\s*:/g
+			let varMatch
+			while ((varMatch = varRegex.exec(cssText)) !== null) {
+				targetVarSet.add('$' + varMatch[1]) // Lưu tên biến (vd: $primary-color)
+			}
+		}
+
+		// 1. Dọn dẹp sơ bộ (Giữ nguyên logic cũ của bạn)
 		let clean = cssText
-			.replace(/\/\*[\s\S]*?\*\//g, '') // Xóa comment /**/
-			.replace(/\/\/.*$/gm, '') // Xóa comment //
-			.replace(/\{%[\s\S]*?%\}/g, ' ') // Xóa Liquid logic
-			.replace(/\{\{[\s\S]*?\}\}/g, ' ') // Xóa Liquid variable
-			.replace(/\([^\)]*\)/g, '()') // Xóa nội dung trong ( ) ví dụ @media (max-width...) -> @media ()
+			.replace(/\/\*[\s\S]*?\*\//g, '')
+			.replace(/\/\/.*$/gm, '')
+			.replace(/\{%[\s\S]*?%\}/g, ' ')
+			.replace(/\{\{[\s\S]*?\}\}/g, ' ')
+			.replace(/\([^\)]*\)/g, '()')
 
 		let stack = []
 		let buffer = ''
 
-		// Regex trích xuất class name từ chuỗi selector (ví dụ: ".box-title, .item" -> ["box-title", "item"])
-		// Bỏ qua các pseudo-class như :hover, ::before
+		// Regex trích xuất class name (Giữ nguyên)
 		const extractClassNames = str => {
-			// Chỉ lấy phần trước dấu : (nếu có)
 			const pureStr = str.split(':')[0]
 			const matches = pureStr.match(/\.(-?[_a-zA-Z0-9-]+)/g)
 			return matches ? matches.map(c => c.substring(1)) : []
 		}
 
+		// ... (Phần vòng lặp for parse class giữ nguyên không đổi) ...
 		for (let i = 0; i < clean.length; i++) {
 			const char = clean[i]
 			if (char === '{') {
 				const selectorStr = buffer.trim()
-
-				// Nếu là @media hoặc keyframes, ta coi như "trong suốt" (transparent), push null để giữ stack level
 				if (selectorStr.startsWith('@')) {
 					stack.push(null)
 				} else {
 					const classesInSelector = extractClassNames(selectorStr)
-
 					if (classesInSelector.length > 0) {
-						const currentClass = classesInSelector[classesInSelector.length - 1] // Lấy class cuối cùng làm key chính
-
-						targetSet.add(currentClass) // Thêm vào danh sách tổng
-
-						// Tìm cha gần nhất trong stack để gán quan hệ
+						const currentClass = classesInSelector[classesInSelector.length - 1]
+						targetSet.add(currentClass)
 						if (stack.length > 0) {
 							let parent = null
-							// Duyệt ngược stack để tìm cha (bỏ qua null - tức là bỏ qua @media)
 							for (let k = stack.length - 1; k >= 0; k--) {
 								if (stack[k]) {
 									parent = stack[k]
 									break
 								}
 							}
-
 							if (parent) {
 								if (!targetMap[parent]) targetMap[parent] = new Set()
 								targetMap[parent].add(currentClass)
-								// Debug: console.log(`Mapped: .${parent} > .${currentClass}`);
 							}
 						}
 						stack.push(currentClass)
 					} else {
-						// Gặp thẻ div, body, hoặc id... push null
 						stack.push(null)
 					}
 				}
@@ -352,6 +353,7 @@
 
 			if (forceUpdate) {
 				externalCssClasses.clear()
+				externalScssVariables.clear() // [NEW] Xóa biến cũ
 				cssParentChildMap = {}
 			}
 
@@ -384,7 +386,7 @@
 
 				if (cssContent && typeof cssContent === 'string') {
 					// QUAN TRỌNG: Truyền biến toàn cục vào đây
-					parseSCSSWithStack(cssContent, externalCssClasses, cssParentChildMap)
+					parseSCSSWithStack(cssContent, externalCssClasses, cssParentChildMap, externalScssVariables)
 				}
 			}
 
@@ -570,59 +572,131 @@
 		const cursor = editor.getCursor()
 		const token = editor.getTokenAt(cursor)
 		const line = editor.getLine(cursor.line)
+		const startChar = line.charAt(token.start)
 
-		// Kiểm tra xem người dùng có đang gõ tên class (bắt đầu bằng .) hay không
-		const isClassSelector = token.string.startsWith('.') || (token.type === 'error' && /^[\w-]+$/.test(token.string) && line.charAt(token.start - 1) === '.') || (token.string.trim() === '' && line.charAt(cursor.ch - 1) === '.')
+		// Xử lý từ khóa đang gõ
+		let word = token.string
+		let start = token.start
 
-		if (isClassSelector) {
-			// 1. Xử lý gợi ý Custom Class
-			let word = token.string
-			let start = token.start
-
-			if (word.startsWith('.')) {
-				word = word.slice(1)
-				start++ // Bỏ qua dấu chấm khi tính vị trí replace
-			} else if (line.charAt(token.start - 1) === '.') {
-				// Trường hợp token là tên class nhưng dấu . nằm ở token trước
+		// --- [NEW] CASE 1: SCSS Variables ($) ---
+		// Kiểm tra nếu token bắt đầu bằng $ HOẶC ký tự trước đó là $
+		if (word.startsWith('$') || startChar === '$' || token.type === 'variable-2') {
+			if (!word.startsWith('$') && startChar === '$') {
+				// Trường hợp vừa gõ $ chưa có chữ (token có thể rỗng hoặc sai lệch)
+				word = '$' + word
 				start = token.start
-			} else if (word.trim() === '') {
-				// Trường hợp mới gõ dấu . và chưa có chữ nào
-				start = cursor.ch
+			} else if (word === '$') {
+				// Mới chỉ gõ dấu $
 			}
 
-			const all = [...externalCssClasses, ...localCssClasses]
-			const matched = all
-				.filter(c => c.toLowerCase().startsWith(word.toLowerCase()))
-				.sort((a, b) => a.length - b.length)
-				.slice(0, 50) // Limit
+			// Lấy danh sách biến
+			const allVars = [...externalScssVariables, ...localScssVariables]
+			const matched = allVars.filter(v => v.startsWith(word))
+
+			return {
+				list: matched.map(v => ({
+					text: v,
+					displayText: v,
+					className: 'CodeMirror-hint-scss-var', // CSS class để style màu sắc nếu muốn
+				})),
+				from: CodeMirror.Pos(cursor.line, start),
+				to: CodeMirror.Pos(cursor.line, cursor.ch),
+			}
+		}
+
+		// --- [NEW] CASE 2: SCSS Directives (@) ---
+		if (word.startsWith('@') || startChar === '@' || token.type === 'def') {
+			let search = word.startsWith('@') ? word : '@' + word
+			// Lọc trong danh sách built-in bắt đầu bằng @
+			const matched = scssBuiltIns.filter(item => item.startsWith('@') && item.startsWith(search))
 
 			if (matched.length > 0) {
 				return {
-					list: matched.map(c => ({
-						text: c,
-						displayText: `.${c}`, // Hiển thị có dấu chấm cho dễ nhìn
-						className: 'CodeMirror-hint-css-selector',
-					})),
+					list: matched,
 					from: CodeMirror.Pos(cursor.line, start),
 					to: CodeMirror.Pos(cursor.line, cursor.ch),
 				}
 			}
 		}
 
-		// 2. Nếu không phải class selector, fallback về native CSS hint (thuộc tính, giá trị)
-		// Sử dụng CodeMirror.hint.css hoặc scss nếu có
+		// --- CASE 3: CSS Class Selectors (.) ---
+		// (Logic cũ của bạn, giữ nguyên)
+		const isClassSelector = word.startsWith('.') || (token.type === 'error' && /^[\w-]+$/.test(word) && line.charAt(start - 1) === '.') || (word.trim() === '' && line.charAt(cursor.ch - 1) === '.')
+
+		if (isClassSelector) {
+			let cleanWord = word
+			let cleanStart = start
+
+			if (cleanWord.startsWith('.')) {
+				cleanWord = cleanWord.slice(1)
+				cleanStart++
+			} else if (line.charAt(start - 1) === '.') {
+				cleanStart = start
+			} else if (cleanWord.trim() === '') {
+				cleanStart = cursor.ch
+			}
+
+			const all = [...externalCssClasses, ...localCssClasses]
+			const matched = all
+				.filter(c => c.toLowerCase().startsWith(cleanWord.toLowerCase()))
+				.sort((a, b) => a.length - b.length)
+				.slice(0, 50)
+
+			if (matched.length > 0) {
+				return {
+					list: matched.map(c => ({
+						text: c,
+						displayText: `.${c}`,
+						className: 'CodeMirror-hint-css-selector',
+					})),
+					from: CodeMirror.Pos(cursor.line, cleanStart),
+					to: CodeMirror.Pos(cursor.line, cursor.ch),
+				}
+			}
+		}
+
+		// --- [NEW] CASE 4: SCSS Functions & Native Values ---
+		// Nếu không phải là class, không phải biến, ta gợi ý hàm SCSS
+		// kết hợp với gợi ý native của CodeMirror (thuộc tính CSS)
+
+		// Gọi native hint trước
 		const nativeHintFunc = CodeMirror.hint.css || CodeMirror.hint.anyword
-		return nativeHintFunc(editor, options)
+		let nativeResult = nativeHintFunc(editor, options) || { list: [], from: CodeMirror.Pos(cursor.line, start), to: CodeMirror.Pos(cursor.line, cursor.ch) }
+
+		// Lọc các hàm SCSS (không bắt đầu bằng @)
+		const matchedScssFuncs = scssBuiltIns.filter(item => !item.startsWith('@') && item.startsWith(word))
+
+		if (matchedScssFuncs.length > 0) {
+			// Gộp kết quả: Hàm SCSS lên đầu, sau đó đến native hints
+			const scssHints = matchedScssFuncs.map(f => ({
+				text: f + '()', // Thêm dấu ngoặc cho hàm
+				displayText: f,
+				className: 'CodeMirror-hint-scss-func',
+			}))
+
+			// Merge vào list native (nếu nativeResult.list là mảng string thì phải convert, nếu là object thì giữ nguyên)
+			// CodeMirror hint list có thể là array string hoặc array object.
+			let mergedList = [...scssHints]
+
+			// Append native items
+			if (nativeResult.list) {
+				mergedList = mergedList.concat(nativeResult.list)
+			}
+
+			nativeResult.list = mergedList
+		}
+
+		return nativeResult
 	}
 
 	// Scan CSS on current file open
 	function scanLocalCSS(editor) {
 		const content = editor.getValue()
 		localCssClasses.clear() // Xóa dữ liệu cũ của file hiện tại
+		localScssVariables.clear() // [NEW] Reset biến local
 
-		// QUAN TRỌNG: Truyền biến localCssClasses để lưu trữ riêng biệt
-		// cssParentChildMap vẫn dùng chung để tận dụng quan hệ cha con
-		parseSCSSWithStack(content, localCssClasses, cssParentChildMap)
+		// [NEW] Truyền localScssVariables vào tham số thứ 4
+		parseSCSSWithStack(content, localCssClasses, cssParentChildMap, localScssVariables)
 
 		return localCssClasses
 	}
@@ -959,7 +1033,7 @@
 	}
 
 	/* ================================= Main ================================ */
-	function applyConfig(cm) {
+	function applyConfigToCodeMirror(cm) {
 		if (cm._hasAllInOneHook) return
 
 		console.log('[All-in-One] Strict JS/CSS Context Applied!')
@@ -1089,8 +1163,7 @@
 	}
 
 	function init() {
-		currentFileType = detectFileType(window.location.href)
-		console.log('currentFileType', currentFileType)
+		loadLibs()
 		waitLoadElement('#asset-list-container li a', function () {
 			initCSSManager()
 		})
@@ -1101,7 +1174,6 @@
             .CodeMirror-hint-active { background: #0084ff !important; color: white !important; }
         `
 		document.head.appendChild(customStyle)
-		loadLibs()
 	}
 
 	function startObserver() {
@@ -1110,10 +1182,10 @@
 				mutation.addedNodes.forEach(node => {
 					if (node.nodeType === 1) {
 						if (node.classList.contains('CodeMirror') && node.CodeMirror) {
-							applyConfig(node.CodeMirror)
+							applyConfigToCodeMirror(node.CodeMirror)
 						} else {
 							node.querySelectorAll('.CodeMirror').forEach(cmEl => {
-								if (cmEl.CodeMirror) applyConfig(cmEl.CodeMirror)
+								if (cmEl.CodeMirror) applyConfigToCodeMirror(cmEl.CodeMirror)
 							})
 						}
 					}
@@ -1123,7 +1195,7 @@
 		observer.observe(document.body, { childList: true, subtree: true })
 		document.querySelectorAll('.CodeMirror').forEach(cmEl => {
 			if (cmEl.CodeMirror) {
-				applyConfig(cmEl.CodeMirror)
+				applyConfigToCodeMirror(cmEl.CodeMirror)
 			}
 		})
 	}
@@ -1132,7 +1204,7 @@
 		waitLoadElement('.CodeMirror', function () {
 			document.querySelectorAll('.CodeMirror').forEach(cmEl => {
 				if (cmEl.CodeMirror) {
-					applyConfig(cmEl.CodeMirror)
+					applyConfigToCodeMirror(cmEl.CodeMirror)
 					setTimeout(init, 2000)
 				}
 			})
